@@ -1,0 +1,125 @@
+--- virt_volume	2018-01-24 11:17:44.000279000 +0100
++++ /home/DEVWL/git/lx5-deploy-infra/roles/modules/library/virt_volume	2018-01-23 10:24:15.000717000 +0100
+@@ -32,6 +32,10 @@
+       - The size of the storage volume 
+         default in bytes or optionally with one of [bBsSkKmMgGtTpPeE] units
+         Float values must begin with a digit.
++  exclude_pool:
++    description:
++      - exclude pools based on regular expression
++    required: false
+   format:
+     default: raw
+     description:
+@@ -118,26 +122,32 @@
+ def main():
+     module = AnsibleModule(
+         argument_spec = dict(
+-            capacity = dict(required = False, default = None),
++            capacity     = dict(required = False, default = None),
++            exclude_pool = dict(required = False, type = 'str', default = None),
++            refresh_pool = dict(required = False, type = 'bool', default = True),
+             ### FIXME: add various formats a choices here
+-            format   = dict(default = 'raw', type = 'str'),
+-            name     = dict(required = False, type = 'str', default = None),
+-            pool     = dict(default = None, required = False, type = 'str'),
+-            state    = dict(required = False, default = 'present', choices = [ 'present', 'absent', 'wipe' ]),
+-            strategy = dict(default = 'least', type = 'str', choices = [ 'least', 'most', 'random' ]),
++            format       = dict(default = 'raw', type = 'str'),
++            name         = dict(required = False, type = 'str', default = None),
++            pool         = dict(default = None, required = False, type = 'str'),
++            state        = dict(required = False, default = 'present', choices = [ 'present', 'absent', 'wipe' ]),
++            strategy     = dict(default = 'least', type = 'str', choices = [ 'least', 'most', 'random' ]),
++            uri          = dict(default = 'qemu:///system', type= 'str', required = False ),
+         ),
+         supports_check_mode = True
+     )
+ 
+     pool_name = module.params.get('pool')
++    exclude_pool = module.params.get('exclude_pool')
++    refresh_pool = module.params.get('refresh_pool')
+     state = module.params.get('state')
+     strategy = module.params.get('strategy')
+     vol_capacity = module.params.get('capacity')
+     vol_format = module.params.get('format')
+     vol_name = module.params.get('name')
++    uri = module.params.get('uri')
+     
+     try:
+-        server = libvirt.open("qemu:///system")
++        server = libvirt.open(uri)
+     except libvirt.libvirtError, e:
+         module.fail_json(msg=str(e))
+ 
+@@ -163,9 +173,12 @@
+         if pool_name is None:
+             valid_pools = []
+             for p in server.listAllStoragePools(flags=0):
+-                pool_available = p.info()[3]
+-                if pool_available >= vol_capacity:
+-                    valid_pools.append({'name': p.name(), 'available': pool_available})
++                if p.isActive():
++                   if refresh_pool: 
++                      p.refresh(flags=0)
++                   pool_available = p.info()[3]
++                   if re.match(exclude_pool, p.name()) is None and pool_available >= vol_capacity:
++                       valid_pools.append({'name': p.name(), 'available': pool_available})
+ 
+             p_used = None
+             if strategy == 'least':
+@@ -185,10 +198,16 @@
+             else:
+                 module.fail_json(msg="Unknown strategy: %s" % strategy)
+             
++            if p_used is None:
++               module.fail_json(msg="Could not detect a pool with enough free diskspace.")
++
+             pool_name = p_used["name"]
+        
+         p = server.storagePoolLookupByName(pool_name)
+ 
++        if p.info()[3] < vol_capacity:
++           module.fail_json(msg="Pool %s does not have enough free space." % pool_name)
++
+         if vol_name in p.listVolumes():
+             v = p.storageVolLookupByName(vol_name)
+             try:
+@@ -263,21 +282,24 @@
+             module.exit_json(changed=False)
+                 
+     elif state =='wipe':
+-        p = server.storagePoolLookupByName(pool_name)
+-        if vol_name in p.listVolumes():
+-            if module.check_mode is True:
+-                module.exit_json(changed=True)
+-            else:
+-                try:
+-                    p.storageVolLookupByName(vol_name).wipe()
+-                except libvirt.libvirtError, e:
+-                    module.fail_json(msg="Failed to wipe the storage volume: %s" % str(e))
+-                except:
+-                    module.fail_json(msg="Failed to wipe the storage volume.")
+-                
+-                module.exit_json(changed=True)
++        if pool_name is None:
++           module.fail_json(msg="You must specify a pool.")
+         else:
+-            module.fail_json(msg="The volume was not found.")
++            p = server.storagePoolLookupByName(pool_name)
++            if vol_name in p.listVolumes():
++                if module.check_mode is True:
++                     module.exit_json(changed=True)
++                else:
++                     try:
++                         p.storageVolLookupByName(vol_name).wipe()
++                     except libvirt.libvirtError, e:
++                         module.fail_json(msg="Failed to wipe the storage volume: %s" % str(e))
++                     except:
++                         module.fail_json(msg="Failed to wipe the storage volume.")
++                   
++                     module.exit_json(changed=True)
++            else:
++                module.fail_json(msg="The volume was not found.")
+             
+ 
+ 
